@@ -1,0 +1,31 @@
+{
+  "name": "moms-coming-game",
+  "version": "1.0.0",
+  "description": "Real-world GPS hide and seek with strategic missions and GTA-style satellite view",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "db:setup": "node scripts/setup-database.js",
+    "test": "echo \"Tests coming soon\""
+  },
+  "keywords": ["gps", "hide-and-seek", "real-time", "game", "location-based"],
+  "author": "Q",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.6.1",
+    "pg": "^8.11.3",
+    "axios": "^1.6.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "uuid": "^9.0.1",
+    "@googlemaps/google-maps-services-js": "^3.3.42"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

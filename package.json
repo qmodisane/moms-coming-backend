@@ -19,7 +19,8 @@
     "axios": "^1.6.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "@googlemaps/google-maps-services-js": "^3.3.42"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

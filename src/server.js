@@ -11,15 +11,23 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
+    origin: [
+      'http://localhost:3001',
+      'https://moms-coming.netlify.app'  // Add your Netlify URL
+    ],
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
 // Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(cors({
+  origin: [
+    'http://localhost:3001',
+    'https://moms-coming.netlify.app'  // Add your Netlify URL
+  ],
+  credentials: true
+}));
 
 // Static files (for future frontend)
 app.use(express.static(path.join(__dirname, '../public')));

@@ -6,11 +6,15 @@ const { v4: uuidv4 } = require('uuid');
 // Create new game session
 router.post('/create', async (req, res) => {
   try {
-    const { hostPlayerId, hostPlayerName, gameMode, settings } = req.body;
+    const { playerName, gameMode, settings } = req.body;
 
-    if (!hostPlayerId || !hostPlayerName) {
-      return res.status(400).json({ error: 'Host player info required' });
+    if (!playerName) {
+      return res.status(400).json({ error: 'Player name required' });
     }
+
+    // Generate unique player ID
+    const hostPlayerId = uuidv4();
+    const hostPlayerName = playerName;
 
     // Generate 6-digit code
     const sessionCode = Math.floor(100000 + Math.random() * 900000).toString();
@@ -55,6 +59,10 @@ router.post('/create', async (req, res) => {
         hostPlayerId: session.host_player_id,
         status: session.status,
         settings: session.settings
+      },
+      player: {
+        id: hostPlayerId,
+        name: hostPlayerName
       }
     });
   } catch (error) {

@@ -144,6 +144,13 @@ router.post('/:sessionId/boundary', async (req, res) => {
       [sessionId, JSON.stringify(boundaryData), JSON.stringify(boundaryData)]
     );
 
+    // Emit socket event to all players
+    const io = req.app.get('io');
+    io.to(sessionId).emit('boundary:set', {
+      sessionId,
+      boundary: boundaryData
+    });
+
     res.json({ success: true, boundary: boundaryData });
   } catch (error) {
     console.error('Set boundary error:', error);
@@ -167,6 +174,13 @@ router.post('/:sessionId/immunity-spot', async (req, res) => {
        VALUES ($1, $2, $3, $4, $5)`,
       [sessionId, JSON.stringify(location), 50, 0, 1]
     );
+
+    // Emit socket event to all players
+    const io = req.app.get('io');
+    io.to(sessionId).emit('immunity:placed', {
+      sessionId,
+      location
+    });
 
     res.json({ success: true });
   } catch (error) {
@@ -200,9 +214,24 @@ router.post('/:sessionId/start', async (req, res) => {
       return res.status(400).json({ error: 'Must set boundary before starting' });
     }
 
+    // Update game status to active
+    await db.query(
+      'UPDATE game_sessions SET status = $1, started_at = NOW() WHERE id = $2',
+      ['active', sessionId]
+    );
+
     // Get game engine from app
     const gameEngine = req.app.get('gameEngine');
     await gameEngine.startGame(sessionId);
+
+    // Emit socket event to all players in the session
+    const io = req.app.get('io');
+    io.to(sessionId).emit('game:started', {
+      sessionId,
+      message: 'Game is starting!'
+    });
+
+    console.log(`🚀 Game ${sessionId} started - notified all players`);
 
     res.json({ success: true, message: 'Game started' });
   } catch (error) {
@@ -283,6 +312,15 @@ router.post('/:sessionId/assign-seeker', async (req, res) => {
       'UPDATE game_players SET role = $1 WHERE id = $2 AND session_id = $3',
       ['seeker', playerId, sessionId]
     );
+
+    // Emit socket event to all players
+    const io = req.app.get('io');
+    io.to(sessionId).emit('seeker:assigned', {
+      playerId,
+      message: 'Seeker has been assigned'
+    });
+
+    console.log(`👁️ Seeker assigned in game ${sessionId}: player ${playerId}`);
 
     res.json({ success: true });
   } catch (error) {

@@ -91,17 +91,18 @@ socket.on('game:join', async ({ sessionId, playerId, playerName }) => {
 });
 
   // Player updates location
-  socket.on('location:update', async ({ sessionId, playerId, location }) => {
-    try {
-      const db = require('./config/database');
-      await db.query(
-        'UPDATE game_players SET last_location = $1 WHERE id = $2',
-        [JSON.stringify(location), playerId]
-      );
-    } catch (error) {
-      console.error('Location update error:', error);
-    }
-  });
+socket.on('location:update', async ({ sessionId, playerId, location }) => {
+  try {
+    const db = require('./config/database');
+    await db.query(
+      'UPDATE game_players SET last_location = $1 WHERE player_id = $2',  // ✅ Use player_id column
+      [JSON.stringify(location), playerId]
+    );
+    console.log(`📍 Location updated for player ${playerId}`);
+  } catch (error) {
+    console.error('Location update error:', error);
+  }
+});
 
   // Player claims immunity spot
   socket.on('immunity:claim', async ({ sessionId, playerId }) => {

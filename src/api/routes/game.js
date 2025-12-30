@@ -12,18 +12,14 @@ router.post('/create', async (req, res) => {
       return res.status(400).json({ error: 'Player name required' });
     }
 
-    // Generate unique player ID
     const hostPlayerId = uuidv4();
     const hostPlayerName = playerName;
-
-    // Generate 6-digit code
     const sessionCode = Math.floor(100000 + Math.random() * 900000).toString();
 
-    // Default settings
     const defaultSettings = {
-      duration: 3600000, // 1 hour in ms
-      boundaryShrinkInterval: 600000, // 10 min
-      missionFrequency: 300000, // 5 min
+      duration: 3600000,
+      boundaryShrinkInterval: 600000,
+      missionFrequency: 300000,
       offLimitsEnabled: false,
       seekerCount: 1,
       winCondition: 'hybrid',
@@ -32,7 +28,6 @@ router.post('/create', async (req, res) => {
 
     const finalSettings = { ...defaultSettings, ...settings };
 
-    // Create session
     const sessionResult = await db.query(
       `INSERT INTO game_sessions 
        (session_code, host_player_id, status, game_mode, settings)
@@ -43,7 +38,6 @@ router.post('/create', async (req, res) => {
 
     const session = sessionResult.rows[0];
 
-    // Add host as first player
     await db.query(
       `INSERT INTO game_players 
        (session_id, player_id, player_name, role, status)
@@ -80,7 +74,6 @@ router.post('/join', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Find session
     const session = await db.query(
       'SELECT * FROM game_sessions WHERE session_code = $1 AND status = $2',
       [sessionCode, 'lobby']
@@ -92,7 +85,6 @@ router.post('/join', async (req, res) => {
 
     const sessionId = session.rows[0].id;
 
-    // Check if player already joined
     const existingPlayer = await db.query(
       'SELECT * FROM game_players WHERE session_id = $1 AND player_id = $2',
       [sessionId, playerId]
@@ -102,7 +94,6 @@ router.post('/join', async (req, res) => {
       return res.status(400).json({ error: 'Already joined this game' });
     }
 
-    // Add player (default role: hider)
     const playerResult = await db.query(
       `INSERT INTO game_players 
        (session_id, player_id, player_name, role, status)
@@ -136,7 +127,6 @@ router.post('/:sessionId/boundary', async (req, res) => {
       coordinates: coordinates
     };
 
-    // Create boundary record
     await db.query(
       `INSERT INTO game_boundaries 
        (session_id, original_boundary, current_boundary)
@@ -144,12 +134,14 @@ router.post('/:sessionId/boundary', async (req, res) => {
       [sessionId, JSON.stringify(boundaryData), JSON.stringify(boundaryData)]
     );
 
-    // Emit socket event to all players
     const io = req.app.get('io');
-    io.to(sessionId).emit('boundary:set', {
-      sessionId,
+    const roomId = String(sessionId);
+    io.to(roomId).emit('boundary:set', {
+      sessionId: roomId,
       boundary: boundaryData
     });
+
+    console.log(`📍 Boundary set for room ${roomId}`);
 
     res.json({ success: true, boundary: boundaryData });
   } catch (error) {
@@ -175,12 +167,14 @@ router.post('/:sessionId/immunity-spot', async (req, res) => {
       [sessionId, JSON.stringify(location), 50, 0, 1]
     );
 
-    // Emit socket event to all players
     const io = req.app.get('io');
-    io.to(sessionId).emit('immunity:placed', {
-      sessionId,
+    const roomId = String(sessionId);
+    io.to(roomId).emit('immunity:placed', {
+      sessionId: roomId,
       location
     });
+
+    console.log(`🛡️ Immunity spot placed in room ${roomId}`);
 
     res.json({ success: true });
   } catch (error) {
@@ -194,7 +188,6 @@ router.post('/:sessionId/start', async (req, res) => {
   try {
     const { sessionId } = req.params;
 
-    // Verify session exists
     const session = await db.query(
       'SELECT * FROM game_sessions WHERE id = $1',
       [sessionId]
@@ -204,7 +197,6 @@ router.post('/:sessionId/start', async (req, res) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Verify has boundary
     const boundary = await db.query(
       'SELECT * FROM game_boundaries WHERE session_id = $1',
       [sessionId]
@@ -214,24 +206,22 @@ router.post('/:sessionId/start', async (req, res) => {
       return res.status(400).json({ error: 'Must set boundary before starting' });
     }
 
-    // Update game status to active
     await db.query(
       'UPDATE game_sessions SET status = $1, started_at = NOW() WHERE id = $2',
       ['active', sessionId]
     );
 
-    // Get game engine from app
     const gameEngine = req.app.get('gameEngine');
     await gameEngine.startGame(sessionId);
 
-    // Emit socket event to all players in the session
     const io = req.app.get('io');
-    io.to(sessionId).emit('game:started', {
-      sessionId,
+    const roomId = String(sessionId);
+    io.to(roomId).emit('game:started', {
+      sessionId: roomId,
       message: 'Game is starting!'
     });
 
-    console.log(`🚀 Game ${sessionId} started - notified all players`);
+    console.log(`🚀 Game ${roomId} started - emitted to room`);
 
     res.json({ success: true, message: 'Game started' });
   } catch (error) {
@@ -313,14 +303,14 @@ router.post('/:sessionId/assign-seeker', async (req, res) => {
       ['seeker', playerId, sessionId]
     );
 
-    // Emit socket event to all players
     const io = req.app.get('io');
-    io.to(sessionId).emit('seeker:assigned', {
+    const roomId = String(sessionId);
+    io.to(roomId).emit('seeker:assigned', {
       playerId,
       message: 'Seeker has been assigned'
     });
 
-    console.log(`👁️ Seeker assigned in game ${sessionId}: player ${playerId}`);
+    console.log(`👁️ Seeker assigned in room ${roomId}: player ${playerId}`);
 
     res.json({ success: true });
   } catch (error) {

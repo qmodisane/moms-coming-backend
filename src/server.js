@@ -60,31 +60,35 @@ app.set('io', io);
 io.on('connection', (socket) => {
   console.log(`🔌 Player connected: ${socket.id}`);
 
-  // Player joins game session
-  socket.on('game:join', async ({ sessionId, playerId, playerName }) => {
-    try {
-      socket.join(sessionId);
-      socket.sessionId = sessionId;
-      socket.playerId = playerId;
-      socket.playerName = playerName;
+// Player joins game session
+socket.on('game:join', async ({ sessionId, playerId, playerName }) => {
+  try {
+    // ✅ CRITICAL: Convert sessionId to string for consistent room names
+    const roomId = String(sessionId);
+    
+    socket.join(roomId);
+    socket.sessionId = roomId;  // ✅ Store as string
+    socket.playerId = playerId;
+    socket.playerName = playerName;
 
-      console.log(`Player ${playerName} joined game ${sessionId}`);
+    console.log(`✅ Player ${playerName} joined room ${roomId}`);
 
-      // Notify others
-      socket.to(sessionId).emit('player:joined', {
-        playerId,
-        playerName
-      });
+    // Notify others
+    socket.to(roomId).emit('player:joined', {
+      playerId,
+      playerName
+    });
 
-      // Send current game state
-      socket.emit('game:joined', {
-        sessionId,
-        playerId
-      });
-    } catch (error) {
-      socket.emit('error', { message: 'Failed to join game' });
-    }
-  });
+    // Send current game state
+    socket.emit('game:joined', {
+      sessionId: roomId,
+      playerId
+    });
+  } catch (error) {
+    console.error('Join game error:', error);
+    socket.emit('error', { message: 'Failed to join game' });
+  }
+});
 
   // Player updates location
   socket.on('location:update', async ({ sessionId, playerId, location }) => {

@@ -1,395 +1,436 @@
 const db = require('../config/database');
-const GoogleMapsService = require('./GoogleMapsService');
-const MissionGenerator = require('./MissionGenerator');
-const ViolationHandler = require('./ViolationHandler');
 
 class GameEngine {
   constructor(io) {
     this.io = io;
     this.activeGames = new Map();
-    this.updateInterval = 1000; // 1 second
+    this.gameTimers = new Map();
+    this.missionTimers = new Map();
+    this.shrinkTimers = new Map();
   }
 
-  /**
-   * Start game loop for a session
-   */
   async startGame(sessionId) {
-    if (this.activeGames.has(sessionId)) {
-      console.log(`Game ${sessionId} already running`);
-      return;
-    }
-
-    console.log(`🎮 Starting game: ${sessionId}`);
-
-    // Update session status
-    await db.query(
-      'UPDATE game_sessions SET status = $1, started_at = NOW() WHERE id = $2',
-      ['active', sessionId]
-    );
-
-    // Initialize game state
-    const gameState = {
-      sessionId,
-      interval: setInterval(() => this.gameLoop(sessionId), this.updateInterval),
-      lastUpdate: Date.now(),
-      gameStartTime: Date.now(),
-      communicationEnabled: false
-    };
-
-    this.activeGames.set(sessionId, gameState);
-
-    // Log game start event
-    await this.logEvent(sessionId, 'game_started', null, {
-      timestamp: new Date().toISOString()
-    });
-  }
-
-  /**
-   * Stop game loop
-   */
-  async stopGame(sessionId) {
-    const gameState = this.activeGames.get(sessionId);
-    if (gameState) {
-      clearInterval(gameState.interval);
-      this.activeGames.delete(sessionId);
-      
-      await db.query(
-        'UPDATE game_sessions SET status = $1, ended_at = NOW() WHERE id = $2',
-        ['finished', sessionId]
-      );
-
-      console.log(`🛑 Stopped game: ${sessionId}`);
-    }
-  }
-
-  /**
-   * Main game loop - runs every second
-   */
-  async gameLoop(sessionId) {
+    console.log(`🎮 Starting game engine for session ${sessionId}`);
+    
     try {
-      const gameState = this.activeGames.get(sessionId);
-      if (!gameState) return;
-
-      // Get game session info
-      const session = await this.getSession(sessionId);
-      if (!session) {
-        this.stopGame(sessionId);
-        return;
-      }
-
-      // Calculate game elapsed time
-      const elapsed = Date.now() - gameState.gameStartTime;
-      const totalDuration = session.settings.duration || 3600000; // Default 1 hour
-      const remaining = totalDuration - elapsed;
-
-      // Check if game should end
-      if (remaining <= 0) {
-        await this.endGame(sessionId);
-        return;
-      }
-
-      // Enable communication in final 10 minutes
-      const finalPhaseThreshold = 10 * 60 * 1000; // 10 minutes
-      if (remaining <= finalPhaseThreshold && !gameState.communicationEnabled) {
-        gameState.communicationEnabled = true;
-        this.io.to(sessionId).emit('communication:enabled', {
-          messagesAllowed: 3,
-          pointTradingEnabled: true
-        });
-      }
-
-      // 1. Check boundary violations
-      await this.checkBoundaryViolations(sessionId);
-
-      // 2. Check mission deadlines
-      await this.checkMissionDeadlines(sessionId);
-
-      // 3. Check boundary shrink schedule
-      await this.checkBoundaryShrink(sessionId, elapsed);
-
-      // 4. Check immunity spot drain
-      await this.checkImmunitySpotDrain(sessionId);
-
-      // 5. Update end-game immunity costs
-      await this.updateImmunityCosts(sessionId, remaining, totalDuration);
-
-      // 6. Broadcast game state
-      await this.broadcastGameState(sessionId);
-
-    } catch (error) {
-      console.error(`Game loop error (${sessionId}):`, error);
-    }
-  }
-
-  /**
-   * Check if players are out of bounds
-   */
-  async checkBoundaryViolations(sessionId) {
-    const players = await this.getActivePlayers(sessionId);
-    const boundary = await this.getCurrentBoundary(sessionId);
-
-    if (!boundary) return;
-
-    for (const player of players) {
-      if (!player.last_location) continue;
-
-      const location = player.last_location;
-      const inBounds = GoogleMapsService.isPointInBounds(location, boundary);
-
-      if (!inBounds) {
-        await ViolationHandler.handleOutOfBounds(sessionId, player.id, location);
-        
-        // Emit violation to all players
-        this.io.to(sessionId).emit('violation:out_of_bounds', {
-          playerId: player.id,
-          playerName: player.player_name,
-          location: location,
-          revealDuration: 5000
-        });
-      }
-    }
-  }
-
-  /**
-   * Check mission deadlines
-   */
-  async checkMissionDeadlines(sessionId) {
-    const result = await db.query(
-      `SELECT * FROM missions 
-       WHERE session_id = $1 
-       AND status = 'assigned' 
-       AND deadline < NOW()`,
-      [sessionId]
-    );
-
-    for (const mission of result.rows) {
-      await ViolationHandler.handleMissionFailed(sessionId, mission);
+      const roomId = String(sessionId);
       
-      // Notify player
-      this.io.to(sessionId).emit('mission:failed', {
-        missionId: mission.id,
-        playerId: mission.assigned_to,
-        penalty: -20
-      });
+      // Initialize game state
+      const gameState = {
+        sessionId,
+        startTime: Date.now(),
+        duration: 3600000, // 60 minutes
+        missionInterval: 300000, // 5 minutes
+        shrinkInterval: 600000, // 10 minutes
+        lastMissionSpawn: Date.now(),
+        lastShrink: Date.now(),
+        isActive: true
+      };
+      
+      this.activeGames.set(sessionId, gameState);
+      
+      // Start game timer (check every second)
+      const gameTimer = setInterval(() => {
+        this.gameLoop(sessionId);
+      }, 1000);
+      
+      this.gameTimers.set(sessionId, gameTimer);
+      
+      // Spawn initial missions
+      setTimeout(() => {
+        this.spawnMissions(sessionId);
+      }, 30000); // First missions after 30 seconds
+      
+      // First boundary shrink after 10 minutes
+      const shrinkTimer = setInterval(() => {
+        this.shrinkBoundary(sessionId);
+      }, 600000); // 10 minutes
+      
+      this.shrinkTimers.set(sessionId, shrinkTimer);
+      
+      console.log(`✅ Game engine started for session ${sessionId}`);
+      
+    } catch (error) {
+      console.error(`Failed to start game ${sessionId}:`, error);
     }
   }
 
-  /**
-   * Check if boundary should shrink
-   */
-  async checkBoundaryShrink(sessionId, elapsedTime) {
-    const boundaryData = await db.query(
-      'SELECT * FROM game_boundaries WHERE session_id = $1',
-      [sessionId]
-    );
-
-    if (boundaryData.rows.length === 0) return;
-
-    const boundary = boundaryData.rows[0];
-    const shrinkInterval = 10 * 60 * 1000; // 10 minutes
-
-    const timeSinceLastShrink = boundary.last_shrink_at 
-      ? Date.now() - new Date(boundary.last_shrink_at).getTime()
-      : elapsedTime;
-
-    if (timeSinceLastShrink >= shrinkInterval) {
-      await this.shrinkBoundary(sessionId);
-    }
-  }
-
-  /**
-   * Shrink the game boundary
-   */
-  async shrinkBoundary(sessionId) {
-    console.log(`📉 Shrinking boundary for game: ${sessionId}`);
-
-    const result = await db.query(
-      'SELECT current_boundary FROM game_boundaries WHERE session_id = $1',
-      [sessionId]
-    );
-
-    if (result.rows.length === 0) return;
-
-    const currentBoundary = result.rows[0].current_boundary;
-    const newBoundary = GoogleMapsService.shrinkBoundary(currentBoundary, 0.8); // Shrink to 80%
-
-    await db.query(
-      `UPDATE game_boundaries 
-       SET current_boundary = $1, last_shrink_at = NOW() 
-       WHERE session_id = $2`,
-      [JSON.stringify(newBoundary), sessionId]
-    );
-
-    // Log event
-    await this.logEvent(sessionId, 'boundary_shrink', null, { newBoundary });
-
-    // Notify all players with 30-second warning
-    this.io.to(sessionId).emit('boundary:shrinking', {
-      newBoundary,
-      warningSec: 30
-    });
-
-    // Actually apply shrink after warning
-    setTimeout(() => {
-      this.io.to(sessionId).emit('boundary:shrunk', { newBoundary });
-    }, 30000);
-  }
-
-  /**
-   * Check immunity spot point drain
-   */
-  async checkImmunitySpotDrain(sessionId) {
-    const result = await db.query(
-      `SELECT i.*, p.points, p.id as player_id, p.player_name
-       FROM immunity_spots i
-       JOIN game_players p ON i.occupied_by = p.id
-       WHERE i.session_id = $1 AND i.occupied_by IS NOT NULL`,
-      [sessionId]
-    );
-
-    for (const spot of result.rows) {
-      const drainAmount = spot.drain_rate;
-      const newPoints = spot.points - drainAmount;
-
-      // Deduct points
-      await db.query(
-        'UPDATE game_players SET points = points - $1 WHERE id = $2',
-        [drainAmount, spot.player_id]
-      );
-
-      // Log transaction
-      await db.query(
-        `INSERT INTO point_transactions 
-         (session_id, from_player_id, amount, transaction_type, reason)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [sessionId, spot.player_id, -drainAmount, 'immunity_cost', 'Immunity spot occupation drain']
-      );
-
-      // If out of points, eject from immunity spot
-      if (newPoints < 0) {
-        await db.query(
-          'UPDATE immunity_spots SET occupied_by = NULL, occupied_at = NULL WHERE id = $1',
-          [spot.id]
-        );
-
-        this.io.to(sessionId).emit('immunity:ejected', {
-          playerId: spot.player_id,
-          playerName: spot.player_name,
-          reason: 'Insufficient points'
-        });
+  async gameLoop(sessionId) {
+    const gameState = this.activeGames.get(sessionId);
+    if (!gameState || !gameState.isActive) return;
+    
+    const elapsed = Date.now() - gameState.startTime;
+    const roomId = String(sessionId);
+    
+    try {
+      // Check game duration
+      if (elapsed >= gameState.duration) {
+        await this.endGame(sessionId, 'time_up');
+        return;
       }
-    }
-  }
-
-  /**
-   * Update immunity costs for end game
-   */
-  async updateImmunityCosts(sessionId, remaining, totalDuration) {
-    const finalPhaseThreshold = totalDuration * 0.3; // Last 30% of game
-
-    if (remaining <= finalPhaseThreshold) {
-      // End game - increase costs
-      await db.query(
-        `UPDATE immunity_spots 
-         SET activation_cost = 100, drain_rate = 2 
-         WHERE session_id = $1`,
+      
+      // Check if all hiders caught
+      const result = await db.query(
+        `SELECT COUNT(*) FROM game_players 
+         WHERE session_id = $1 AND role = 'hider' AND status = 'active'`,
         [sessionId]
       );
+      
+      if (result.rows[0].count === '0') {
+        await this.endGame(sessionId, 'all_caught');
+        return;
+      }
+      
+      // Spawn missions every 5 minutes
+      if (elapsed - gameState.lastMissionSpawn >= gameState.missionInterval) {
+        this.spawnMissions(sessionId);
+        gameState.lastMissionSpawn = elapsed;
+      }
+      
+      // Award survival points every minute
+      if (elapsed % 60000 === 0) {
+        await this.awardSurvivalPoints(sessionId);
+      }
+      
+      // Check immunity drain
+      await this.drainImmunityPoints(sessionId);
+      
+      // Enable communication in final 10 minutes
+      if (elapsed >= gameState.duration - 600000 && elapsed < gameState.duration - 599000) {
+        this.io.to(roomId).emit('communication:enabled', {
+          message: 'Communication now available!'
+        });
+      }
+      
+    } catch (error) {
+      console.error(`Game loop error for ${sessionId}:`, error);
     }
   }
 
-  /**
-   * Broadcast current game state to all players
-   */
-  async broadcastGameState(sessionId) {
-    const players = await this.getActivePlayers(sessionId);
-    const boundary = await this.getCurrentBoundary(sessionId);
-    const immunitySpot = await this.getImmunitySpotStatus(sessionId);
-
-    const gameState = {
-      timestamp: Date.now(),
-      players: players.map(p => ({
-        id: p.id,
-        name: p.player_name,
-        role: p.role,
-        points: p.points,
-        violations: p.violations,
-        status: p.status,
-        // Only reveal location if they have violations or are seeker
-        location: (p.violations > 0 || p.role === 'seeker') ? p.last_location : null
-      })),
-      boundary,
-      immunitySpot
-    };
-
-    this.io.to(sessionId).emit('game:state', gameState);
+  async spawnMissions(sessionId) {
+    try {
+      const roomId = String(sessionId);
+      
+      // Get all active hiders
+      const hiders = await db.query(
+        `SELECT id FROM game_players 
+         WHERE session_id = $1 AND role = 'hider' AND status = 'active'`,
+        [sessionId]
+      );
+      
+      if (hiders.rows.length === 0) return;
+      
+      // Mission templates
+      const missionTypes = [
+        {
+          description: 'Stay in one location for 2 minutes',
+          pointValue: 50,
+          riskLevel: 'low',
+          duration: 120000
+        },
+        {
+          description: 'Visit the immunity spot (don\'t claim)',
+          pointValue: 75,
+          riskLevel: 'medium',
+          duration: 300000
+        },
+        {
+          description: 'Get within 50m of seeker and escape',
+          pointValue: 100,
+          riskLevel: 'high',
+          duration: 300000
+        },
+        {
+          description: 'Reach the opposite corner of boundary',
+          pointValue: 60,
+          riskLevel: 'medium',
+          duration: 300000
+        },
+        {
+          description: 'Take a photo of something green',
+          pointValue: 40,
+          riskLevel: 'low',
+          duration: 300000
+        }
+      ];
+      
+      // Assign random mission to each hider
+      for (const hider of hiders.rows) {
+        const mission = missionTypes[Math.floor(Math.random() * missionTypes.length)];
+        
+        await db.query(
+          `INSERT INTO missions 
+           (session_id, assigned_to, description, point_value, risk_level, deadline, status)
+           VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '${mission.duration / 1000} seconds', 'assigned')`,
+          [sessionId, hider.id, mission.description, mission.pointValue, mission.riskLevel]
+        );
+      }
+      
+      this.io.to(roomId).emit('missions:spawned', {
+        message: 'New missions available!'
+      });
+      
+      console.log(`📋 Spawned missions for session ${sessionId}`);
+      
+    } catch (error) {
+      console.error(`Mission spawn error for ${sessionId}:`, error);
+    }
   }
 
-  /**
-   * End the game
-   */
-  async endGame(sessionId) {
-    console.log(`🏁 Ending game: ${sessionId}`);
+  async shrinkBoundary(sessionId) {
+    try {
+      const roomId = String(sessionId);
+      
+      // Get current boundary
+      const result = await db.query(
+        'SELECT current_boundary FROM game_boundaries WHERE session_id = $1',
+        [sessionId]
+      );
+      
+      if (result.rows.length === 0) return;
+      
+      const currentBoundary = result.rows[0].current_boundary;
+      
+      // Warn 30 seconds before
+      this.io.to(roomId).emit('boundary:shrinking', {
+        message: 'Boundary shrinking in 30 seconds!'
+      });
+      
+      setTimeout(async () => {
+        // Calculate new smaller boundary (shrink by 20%)
+        const newBoundary = this.calculateSmallerBoundary(currentBoundary, 0.8);
+        
+        // Update database
+        await db.query(
+          'UPDATE game_boundaries SET current_boundary = $1 WHERE session_id = $2',
+          [JSON.stringify(newBoundary), sessionId]
+        );
+        
+        // Notify players
+        this.io.to(roomId).emit('boundary:shrunk', {
+          newBoundary
+        });
+        
+        // Check for out-of-bounds players
+        await this.checkBoundaryViolations(sessionId, newBoundary);
+        
+        console.log(`📍 Boundary shrunk for session ${sessionId}`);
+      }, 30000);
+      
+    } catch (error) {
+      console.error(`Boundary shrink error for ${sessionId}:`, error);
+    }
+  }
 
-    // Determine winners
-    const players = await db.query(
-      `SELECT * FROM game_players 
-       WHERE session_id = $1 AND status = 'active' 
-       ORDER BY points DESC`,
-      [sessionId]
-    );
-
-    const winners = players.rows.filter(p => p.role === 'hider');
+  calculateSmallerBoundary(boundary, scale) {
+    const coords = boundary.coordinates;
     
-    await this.logEvent(sessionId, 'game_ended', null, {
-      winners: winners.map(w => ({ id: w.id, name: w.player_name, points: w.points }))
-    });
-
-    this.io.to(sessionId).emit('game:ended', {
-      winners,
-      finalScores: players.rows
-    });
-
-    this.stopGame(sessionId);
+    // Find center point
+    const centerLat = coords.reduce((sum, c) => sum + c.lat, 0) / coords.length;
+    const centerLng = coords.reduce((sum, c) => sum + c.lng, 0) / coords.length;
+    
+    // Scale coordinates toward center
+    const newCoords = coords.map(coord => ({
+      lat: centerLat + (coord.lat - centerLat) * scale,
+      lng: centerLng + (coord.lng - centerLng) * scale
+    }));
+    
+    return { coordinates: newCoords };
   }
 
-  // Helper methods
-  async getSession(sessionId) {
-    const result = await db.query('SELECT * FROM game_sessions WHERE id = $1', [sessionId]);
-    return result.rows[0];
+  async checkBoundaryViolations(sessionId, boundary) {
+    try {
+      const roomId = String(sessionId);
+      
+      const players = await db.query(
+        `SELECT id, player_id, last_location FROM game_players 
+         WHERE session_id = $1 AND status = 'active'`,
+        [sessionId]
+      );
+      
+      for (const player of players.rows) {
+        if (!player.last_location) continue;
+        
+        const location = player.last_location;
+        const isInBounds = this.isPointInBounds(location, boundary);
+        
+        if (!isInBounds) {
+          // Increment violations
+          await db.query(
+            'UPDATE game_players SET violations = violations + 1 WHERE id = $1',
+            [player.id]
+          );
+          
+          // Emit violation event
+          this.io.to(roomId).emit('violation', {
+            playerId: player.player_id,
+            location
+          });
+          
+          console.log(`⚠️ Player ${player.player_id} out of bounds`);
+        }
+      }
+      
+    } catch (error) {
+      console.error(`Boundary check error for ${sessionId}:`, error);
+    }
   }
 
-  async getActivePlayers(sessionId) {
-    const result = await db.query(
-      'SELECT * FROM game_players WHERE session_id = $1 AND status = $2',
-      [sessionId, 'active']
-    );
-    return result.rows;
+  isPointInBounds(point, boundary) {
+    const { lat, lng } = point;
+    const polygon = boundary.coordinates;
+    
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].lng, yi = polygon[i].lat;
+      const xj = polygon[j].lng, yj = polygon[j].lat;
+      
+      const intersect = ((yi > lat) !== (yj > lat))
+        && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    
+    return inside;
   }
 
-  async getCurrentBoundary(sessionId) {
-    const result = await db.query(
-      'SELECT current_boundary FROM game_boundaries WHERE session_id = $1',
-      [sessionId]
-    );
-    return result.rows[0]?.current_boundary;
+  async awardSurvivalPoints(sessionId) {
+    try {
+      // Award 10 points per minute to active hiders
+      await db.query(
+        `UPDATE game_players 
+         SET points = points + 10 
+         WHERE session_id = $1 AND role = 'hider' AND status = 'active'`,
+        [sessionId]
+      );
+      
+      console.log(`💰 Awarded survival points for session ${sessionId}`);
+      
+    } catch (error) {
+      console.error(`Survival points error for ${sessionId}:`, error);
+    }
   }
 
-  async getImmunitySpotStatus(sessionId) {
-    const result = await db.query(
-      'SELECT * FROM immunity_spots WHERE session_id = $1',
-      [sessionId]
-    );
-    return result.rows[0] || null;
+  async drainImmunityPoints(sessionId) {
+    try {
+      const roomId = String(sessionId);
+      const gameState = this.activeGames.get(sessionId);
+      const elapsed = Date.now() - gameState.startTime;
+      const isFinalPhase = elapsed >= gameState.duration - 600000; // Last 10 min
+      
+      // Get players in immunity
+      const result = await db.query(
+        `SELECT gp.id, gp.player_id, gp.points, isp.id as spot_id
+         FROM game_players gp
+         JOIN immunity_spots isp ON isp.occupied_by = gp.id
+         WHERE gp.session_id = $1 AND isp.session_id = $1`,
+        [sessionId]
+      );
+      
+      for (const player of result.rows) {
+        const drainRate = isFinalPhase ? 10 : 1; // 10x drain in final phase
+        
+        if (player.points > 0) {
+          await db.query(
+            'UPDATE game_players SET points = GREATEST(0, points - $1) WHERE id = $2',
+            [drainRate, player.id]
+          );
+        } else {
+          // No points left, kick out of immunity
+          await db.query(
+            'UPDATE immunity_spots SET occupied_by = NULL, occupied_at = NULL WHERE id = $1',
+            [player.spot_id]
+          );
+          
+          this.io.to(roomId).emit('immunity:expired', {
+            playerId: player.player_id
+          });
+        }
+      }
+      
+    } catch (error) {
+      console.error(`Immunity drain error for ${sessionId}:`, error);
+    }
   }
 
-  async logEvent(sessionId, eventType, playerId, data) {
-    await db.query(
-      `INSERT INTO game_events (session_id, event_type, player_id, event_data)
-       VALUES ($1, $2, $3, $4)`,
-      [sessionId, eventType, playerId, JSON.stringify(data)]
-    );
+  async endGame(sessionId, reason) {
+    try {
+      const roomId = String(sessionId);
+      const gameState = this.activeGames.get(sessionId);
+      if (!gameState) return;
+      
+      gameState.isActive = false;
+      
+      // Clear timers
+      const gameTimer = this.gameTimers.get(sessionId);
+      const shrinkTimer = this.shrinkTimers.get(sessionId);
+      if (gameTimer) clearInterval(gameTimer);
+      if (shrinkTimer) clearInterval(shrinkTimer);
+      
+      // Update database
+      await db.query(
+        'UPDATE game_sessions SET status = $1, ended_at = NOW() WHERE id = $2',
+        ['ended', sessionId]
+      );
+      
+      // Get final scores
+      const players = await db.query(
+        `SELECT player_id, player_name, role, points, status 
+         FROM game_players WHERE session_id = $1 
+         ORDER BY points DESC`,
+        [sessionId]
+      );
+      
+      // Determine winner
+      let winner;
+      if (reason === 'all_caught') {
+        winner = 'seeker';
+      } else if (reason === 'time_up') {
+        winner = 'hiders';
+      }
+      
+      const gameResult = {
+        winner,
+        reason: reason === 'all_caught' ? 'All hiders caught!' : 'Time ran out!',
+        finalScores: players.rows,
+        gameStats: {
+          duration: this.formatDuration(Date.now() - gameState.startTime),
+          caught: players.rows.filter(p => p.status === 'caught').length,
+          missions: 0, // TODO: count from database
+          shrinks: Math.floor((Date.now() - gameState.startTime) / 600000)
+        }
+      };
+      
+      // Notify all players
+      this.io.to(roomId).emit('game:ended', gameResult);
+      
+      // Cleanup
+      this.activeGames.delete(sessionId);
+      this.gameTimers.delete(sessionId);
+      this.shrinkTimers.delete(sessionId);
+      
+      console.log(`🏁 Game ended for session ${sessionId}: ${reason}`);
+      
+    } catch (error) {
+      console.error(`End game error for ${sessionId}:`, error);
+    }
+  }
+
+  formatDuration(ms) {
+    const minutes = Math.floor(ms / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  }
+
+  async stopGame(sessionId) {
+    await this.endGame(sessionId, 'manual_stop');
   }
 }
 
 module.exports = GameEngine;
+```
+
+---
+
+### 2. server.js (UPDATE location handler)
+```
+C:\Users\Khumo\Desktop\branding\Moms-Coming\moms-coming-backend\moms-coming-game\src\server.js

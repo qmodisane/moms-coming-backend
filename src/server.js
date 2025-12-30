@@ -13,7 +13,7 @@ const io = new Server(server, {
   cors: {
     origin: [
       'http://localhost:3001',
-      'https://moms-coming.netlify.app'  // Add your Netlify URL
+      'https://moms-coming.netlify.app'
     ],
     methods: ['GET', 'POST'],
     credentials: true
@@ -24,16 +24,22 @@ const io = new Server(server, {
 app.use(cors({
   origin: [
     'http://localhost:3001',
-    'https://moms-coming.netlify.app'  // Add your Netlify URL
+    'https://moms-coming.netlify.app'
   ],
   credentials: true
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-
-// Static files (for future frontend)
+// Static files
 app.use(express.static(path.join(__dirname, '../public')));
+
+// Initialize Game Engine
+const gameEngine = new GameEngine(io);
+
+// Make game engine and io available to routes
+app.set('gameEngine', gameEngine);
+app.set('io', io);
 
 // API Routes
 app.use('/api/game', require('./api/routes/game'));
@@ -49,71 +55,68 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Initialize Game Engine
-const gameEngine = new GameEngine(io);
-
-// Make game engine available to routes
-app.set('gameEngine', gameEngine);
-app.set('io', io);
-
 // WebSocket connection handling
 io.on('connection', (socket) => {
   console.log(`🔌 Player connected: ${socket.id}`);
 
-// Player joins game session
-socket.on('game:join', async ({ sessionId, playerId, playerName }) => {
-  try {
-    // ✅ CRITICAL: Convert sessionId to string for consistent room names
-    const roomId = String(sessionId);
-    
-    socket.join(roomId);
-    socket.sessionId = roomId;  // ✅ Store as string
-    socket.playerId = playerId;
-    socket.playerName = playerName;
+  // Player joins game session
+  socket.on('game:join', async ({ sessionId, playerId, playerName }) => {
+    try {
+      const roomId = String(sessionId);
+      
+      socket.join(roomId);
+      socket.sessionId = roomId;
+      socket.playerId = playerId;
+      socket.playerName = playerName;
 
-    console.log(`✅ Player ${playerName} joined room ${roomId}`);
+      console.log(`✅ Player ${playerName} joined room ${roomId}`);
 
-    // Notify others
-    socket.to(roomId).emit('player:joined', {
-      playerId,
-      playerName
-    });
+      // Notify others
+      socket.to(roomId).emit('player:joined', {
+        playerId,
+        playerName
+      });
 
-    // Send current game state
-    socket.emit('game:joined', {
-      sessionId: roomId,
-      playerId
-    });
-  } catch (error) {
-    console.error('Join game error:', error);
-    socket.emit('error', { message: 'Failed to join game' });
-  }
-});
+      // Send current game state
+      socket.emit('game:joined', {
+        sessionId: roomId,
+        playerId
+      });
+    } catch (error) {
+      console.error('Join game error:', error);
+      socket.emit('error', { message: 'Failed to join game' });
+    }
+  });
 
   // Player updates location
-socket.on('location:update', async ({ sessionId, playerId, location }) => {
-  try {
-    const db = require('./config/database');
-    await db.query(
-      'UPDATE game_players SET last_location = $1 WHERE player_id = $2',  // ✅ Use player_id column
-      [JSON.stringify(location), playerId]
-    );
-    console.log(`📍 Location updated for player ${playerId}`);
-  } catch (error) {
-    console.error('Location update error:', error);
-  }
-});
+  socket.on('location:update', async ({ sessionId, playerId, location }) => {
+    try {
+      const db = require('./config/database');
+      await db.query(
+        'UPDATE game_players SET last_location = $1 WHERE player_id = $2',
+        [JSON.stringify(location), playerId]
+      );
+    } catch (error) {
+      console.error('Location update error:', error);
+    }
+  });
 
   // Player claims immunity spot
   socket.on('immunity:claim', async ({ sessionId, playerId }) => {
     try {
       const db = require('./config/database');
+      const roomId = String(sessionId);
       
       // Check if player has enough points
       const player = await db.query(
-        'SELECT points FROM game_players WHERE id = $1',
+        'SELECT id, points FROM game_players WHERE player_id = $1',
         [playerId]
       );
+
+      if (player.rows.length === 0) {
+        socket.emit('error', { message: 'Player not found' });
+        return;
+      }
 
       const immunitySpot = await db.query(
         'SELECT * FROM immunity_spots WHERE session_id = $1',
@@ -134,17 +137,26 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
         return;
       }
 
+      // Check if already occupied
+      if (spot.occupied_by) {
+        socket.emit('error', { message: 'Immunity spot already occupied' });
+        return;
+      }
+
       // Claim spot
       await db.query(
         'UPDATE immunity_spots SET occupied_by = $1, occupied_at = NOW() WHERE id = $2',
-        [playerId, spot.id]
+        [player.rows[0].id, spot.id]
       );
 
-      io.to(sessionId).emit('immunity:claimed', {
+      io.to(roomId).emit('immunity:claimed', {
         playerId,
         spotId: spot.id
       });
+
+      console.log(`🛡️ Player ${playerId} claimed immunity in room ${roomId}`);
     } catch (error) {
+      console.error('Immunity claim error:', error);
       socket.emit('error', { message: 'Failed to claim immunity' });
     }
   });
@@ -165,6 +177,7 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
       }
 
       const m = mission.rows[0];
+      const roomId = String(m.session_id);
 
       // Mark complete
       await db.query(
@@ -191,11 +204,14 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
         points: m.point_value
       });
 
-      io.to(m.session_id).emit('player:points_updated', {
-        playerId: m.assigned_to,
+      io.to(roomId).emit('player:points_updated', {
+        playerId: socket.playerId,
         points: m.point_value
       });
+
+      console.log(`✅ Mission ${missionId} completed by player ${socket.playerId}`);
     } catch (error) {
+      console.error('Mission complete error:', error);
       socket.emit('error', { message: 'Failed to complete mission' });
     }
   });
@@ -204,10 +220,11 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
   socket.on('player:tag', async ({ sessionId, targetId }) => {
     try {
       const db = require('./config/database');
+      const roomId = String(sessionId);
       
       // Verify seeker
       const seeker = await db.query(
-        'SELECT * FROM game_players WHERE id = $1 AND role = $2',
+        'SELECT * FROM game_players WHERE player_id = $1 AND role = $2',
         [socket.playerId, 'seeker']
       );
 
@@ -216,16 +233,29 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
         return;
       }
 
+      // Get target player database ID
+      const target = await db.query(
+        'SELECT id FROM game_players WHERE player_id = $1',
+        [targetId]
+      );
+
+      if (target.rows.length === 0) {
+        socket.emit('error', { message: 'Target player not found' });
+        return;
+      }
+
       // Tag player
       await db.query(
         'UPDATE game_players SET status = $1, tagged_at = NOW() WHERE id = $2',
-        ['caught', targetId]
+        ['caught', target.rows[0].id]
       );
 
-      io.to(sessionId).emit('player:tagged', {
+      io.to(roomId).emit('player:tagged', {
         targetId,
         seekerId: socket.playerId
       });
+
+      console.log(`🎯 Player ${targetId} tagged by ${socket.playerId}`);
 
       // Check if game should end (all hiders caught)
       const remainingHiders = await db.query(
@@ -233,14 +263,15 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
         [sessionId, 'hider', 'active']
       );
 
-      if (remainingHiders.rows[0].count === 0) {
-        io.to(sessionId).emit('game:ended', {
+      if (remainingHiders.rows[0].count === '0') {
+        io.to(roomId).emit('game:ended', {
           winner: 'seeker',
           reason: 'All hiders caught'
         });
         gameEngine.stopGame(sessionId);
       }
     } catch (error) {
+      console.error('Tag player error:', error);
       socket.emit('error', { message: 'Failed to tag player' });
     }
   });
@@ -249,30 +280,41 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
   socket.on('message:send', async ({ sessionId, toPlayerId, message, isBroadcast }) => {
     try {
       const db = require('./config/database');
+      const roomId = String(sessionId);
       
+      // Get sender player database ID
+      const sender = await db.query(
+        'SELECT id FROM game_players WHERE player_id = $1',
+        [socket.playerId]
+      );
+
+      if (sender.rows.length === 0) return;
+
       // Store message
       await db.query(
         `INSERT INTO game_messages 
          (session_id, from_player_id, to_player_id, message_text, is_broadcast)
          VALUES ($1, $2, $3, $4, $5)`,
-        [sessionId, socket.playerId, toPlayerId, message, isBroadcast]
+        [sessionId, sender.rows[0].id, toPlayerId, message, isBroadcast]
       );
 
       if (isBroadcast) {
-        io.to(sessionId).emit('message:received', {
+        io.to(roomId).emit('message:received', {
           fromPlayerId: socket.playerId,
           fromPlayerName: socket.playerName,
           message
         });
       } else {
-        // Send to specific player (would need player socket mapping)
         socket.to(toPlayerId).emit('message:received', {
           fromPlayerId: socket.playerId,
           fromPlayerName: socket.playerName,
           message
         });
       }
+
+      console.log(`💬 Message sent by ${socket.playerName} in room ${roomId}`);
     } catch (error) {
+      console.error('Send message error:', error);
       socket.emit('error', { message: 'Failed to send message' });
     }
   });
@@ -281,27 +323,39 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
   socket.on('points:transfer', async ({ sessionId, toPlayerId, amount }) => {
     try {
       const db = require('./config/database');
+      const roomId = String(sessionId);
       
-      // Get sender points
+      // Get sender
       const sender = await db.query(
-        'SELECT points FROM game_players WHERE id = $1',
+        'SELECT id, points FROM game_players WHERE player_id = $1',
         [socket.playerId]
       );
 
-      if (sender.rows[0].points < amount) {
+      if (sender.rows.length === 0 || sender.rows[0].points < amount) {
         socket.emit('error', { message: 'Insufficient points' });
+        return;
+      }
+
+      // Get receiver
+      const receiver = await db.query(
+        'SELECT id FROM game_players WHERE player_id = $1',
+        [toPlayerId]
+      );
+
+      if (receiver.rows.length === 0) {
+        socket.emit('error', { message: 'Receiver not found' });
         return;
       }
 
       // Transfer
       await db.query(
         'UPDATE game_players SET points = points - $1 WHERE id = $2',
-        [amount, socket.playerId]
+        [amount, sender.rows[0].id]
       );
 
       await db.query(
         'UPDATE game_players SET points = points + $1 WHERE id = $2',
-        [amount, toPlayerId]
+        [amount, receiver.rows[0].id]
       );
 
       // Log transaction
@@ -309,15 +363,18 @@ socket.on('location:update', async ({ sessionId, playerId, location }) => {
         `INSERT INTO point_transactions 
          (session_id, from_player_id, to_player_id, amount, transaction_type, reason)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [sessionId, socket.playerId, toPlayerId, amount, 'transfer', 'Player point transfer']
+        [sessionId, sender.rows[0].id, receiver.rows[0].id, amount, 'transfer', 'Player point transfer']
       );
 
-      io.to(sessionId).emit('points:transferred', {
+      io.to(roomId).emit('points:transferred', {
         fromPlayerId: socket.playerId,
         toPlayerId,
         amount
       });
+
+      console.log(`💰 ${amount} points transferred from ${socket.playerId} to ${toPlayerId}`);
     } catch (error) {
+      console.error('Transfer points error:', error);
       socket.emit('error', { message: 'Failed to transfer points' });
     }
   });
@@ -352,13 +409,13 @@ server.listen(PORT, () => {
 ║     MOM'S COMING - GAME SERVER         ║
 ║                                        ║
 ║     🎮 Server running on port ${PORT}     ║
-║     🗺️  GTA-style GPS hide and seek    ║
+║     🗺️  GPS hide and seek              ║
 ║     ⚡ Real-time tracking active       ║
 ║                                        ║
 ╚════════════════════════════════════════╝
   `);
   console.log(`
-Environment: ${process.env.NODE_ENV}
+Environment: ${process.env.NODE_ENV || 'development'}
 Database: ${process.env.DB_NAME}
 API: http://localhost:${PORT}
 Health: http://localhost:${PORT}/health

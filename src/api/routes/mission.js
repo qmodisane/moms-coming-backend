@@ -1,38 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../../config/database');
-const MissionGenerator = require('../../services/MissionGenerator');
-
-// Generate missions for all hiders (seeker-triggered)
-router.post('/generate/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-
-    const missions = await MissionGenerator.generateMissionsForAllHiders(sessionId);
-
-    // Notify via WebSocket
-    const io = req.app.get('io');
-    io.to(sessionId).emit('missions:assigned', {
-      count: missions.length,
-      missions: missions.map(m => ({
-        id: m.id,
-        assignedTo: m.assigned_to,
-        description: m.description,
-        points: m.point_value,
-        riskLevel: m.risk_level,
-        deadline: m.deadline
-      }))
-    });
-
-    res.json({
-      success: true,
-      missions
-    });
-  } catch (error) {
-    console.error('Generate missions error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // Complete mission
 router.post('/:missionId/complete', async (req, res) => {
@@ -53,8 +21,8 @@ router.post('/:missionId/complete', async (req, res) => {
 
     // Mark complete
     await db.query(
-      'UPDATE missions SET status = $1, completed_at = NOW(), verification_data = $2 WHERE id = $3',
-      ['completed', JSON.stringify(verificationData), missionId]
+      'UPDATE missions SET status = $1, completed_at = NOW() WHERE id = $2',
+      ['completed', missionId]
     );
 
     // Award points
@@ -71,9 +39,20 @@ router.post('/:missionId/complete', async (req, res) => {
       [m.session_id, m.assigned_to, m.point_value, 'mission_reward', m.description]
     );
 
-    res.json({
-      success: true,
-      pointsEarned: m.point_value
+    const io = req.app.get('io');
+    const roomId = String(m.session_id);
+    io.to(roomId).emit('mission:completed', {
+      missionId,
+      points: m.point_value,
+      playerId: m.assigned_to
+    });
+
+    console.log(`✅ Mission ${missionId} completed via API`);
+
+    res.json({ 
+      success: true, 
+      points: m.point_value,
+      message: 'Mission completed successfully'
     });
   } catch (error) {
     console.error('Complete mission error:', error);
@@ -81,18 +60,18 @@ router.post('/:missionId/complete', async (req, res) => {
   }
 });
 
-// Get active missions for player
-router.get('/player/:playerId', async (req, res) => {
+// Get all missions for a session
+router.get('/session/:sessionId', async (req, res) => {
   try {
-    const { playerId } = req.params;
+    const { sessionId } = req.params;
 
     const missions = await db.query(
-      `SELECT m.* FROM missions m
-       JOIN game_players p ON m.assigned_to = p.id
-       WHERE p.player_id = $1 
-       AND m.status IN ('assigned', 'in_progress')
-       ORDER BY m.deadline ASC`,
-      [playerId]
+      `SELECT m.*, gp.player_name 
+       FROM missions m
+       LEFT JOIN game_players gp ON m.assigned_to = gp.id
+       WHERE m.session_id = $1
+       ORDER BY m.created_at DESC`,
+      [sessionId]
     );
 
     res.json({ missions: missions.rows });
